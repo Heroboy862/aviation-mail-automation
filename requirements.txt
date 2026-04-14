@@ -1,0 +1,5 @@
+pandas
+Pillow
+python-dotenv
+gspread
+google-auth
