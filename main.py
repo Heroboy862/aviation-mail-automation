@@ -19,7 +19,6 @@ load_dotenv()
 
 SMTP_BATCH_SIZE = int(os.getenv("SMTP_BATCH_SIZE", "50"))
 SMTP_BATCH_SLEEP_SECONDS = int(os.getenv("SMTP_BATCH_SLEEP_SECONDS", "10"))
-GEMINI_REQUEST_DELAY_SECONDS = max(float(os.getenv("GEMINI_REQUEST_DELAY_SECONDS", "2")), 0.0)
 
 
 def _env_flag(name: str, default: str = "false") -> bool:
@@ -35,7 +34,6 @@ else:
     ENABLE_STATUS_UPDATE = _env_flag("ENABLE_STATUS_UPDATE", "true")
 MAX_SEND_COUNT = max(int(os.getenv("MAX_SEND_COUNT", "0")), 0)
 ARCHIVE_SENT_PDFS = _env_flag("ARCHIVE_SENT_PDFS", "true")
-GEMINI_USE_MOCK = _env_flag("GEMINI_USE_MOCK", "false")
 
 
 def post_send_attachment_cleanup(sent_jobs: list[dict[str, Any]]) -> None:
@@ -316,8 +314,7 @@ def process_participants() -> None:
         logging.warning("Durum guncellemesi kapali: veri kaynagi yazimi yapilmayacak.")
     prepared_jobs: list[dict[str, Any]] = []
 
-    for index, participant in enumerate(participants):
-        gemini_called = False
+    for participant in participants:
         try:
             if not all(
                 [
@@ -334,7 +331,6 @@ def process_participants() -> None:
                 participant_name=participant["name"],
                 department_name=participant["department"],
             )
-            gemini_called = True
 
             pdf_name = (
                 f"{sanitize_filename(participant['name'])}_"
@@ -369,16 +365,12 @@ def process_participants() -> None:
             )
 
         except Exception as exc:
-            logging.error("Kayit islenemedi (%s): %s", participant.get("name", "Bilinmiyor"), exc)
+            logging.exception(
+                "Kayit islenemedi (%s): %s",
+                participant.get("name", "Bilinmiyor"),
+                exc,
+            )
             continue
-        finally:
-            if (
-                gemini_called
-                and not GEMINI_USE_MOCK
-                and GEMINI_REQUEST_DELAY_SECONDS > 0
-                and index < len(participants) - 1
-            ):
-                time.sleep(GEMINI_REQUEST_DELAY_SECONDS)
 
     if not prepared_jobs:
         logging.info("Gonderilecek yeni kayit bulunamadi.")

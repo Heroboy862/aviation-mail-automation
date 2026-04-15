@@ -17,6 +17,7 @@ DEFAULT_TEXT_COORDS = {
     "career_advice": (300, 780),
 }
 
+# Google Form / Sheets: Zaman Damgasi, Adiniz, Soyadiniz, E-posta Adresiniz, Okulunuz, Bolumunuz, Durum
 FORM_FIELD_ALIASES = {
     "timestamp": ["Zaman Damgası", "Zaman Damgasi", "Timestamp"],
     "first_name": ["Adınız", "Adiniz", "Ad", "First Name"],
