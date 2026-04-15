@@ -14,6 +14,17 @@ DEFAULT_TEXT_COORDS = {
     "department": (300, 640),
 }
 
+FORM_FIELD_ALIASES = {
+    "timestamp": ["Zaman Damgası", "Zaman Damgasi", "Timestamp"],
+    "first_name": ["Adınız", "Adiniz", "Ad", "First Name"],
+    "last_name": ["Soyadınız", "Soyadiniz", "Soyad", "Last Name"],
+    "full_name": ["Adınız Soyadınız", "Adiniz Soyadiniz", "Ad Soyad", "AdSoyad", "name"],
+    "email": ["E-posta Adresiniz", "Eposta Adresiniz", "E-posta", "Eposta", "Email", "email", "Mail", "mail"],
+    "school": ["Okulunuz", "Okul", "okul", "School", "school"],
+    "department": ["Bölümünüz", "Bolumunuz", "Bölüm", "Bolum", "department", "Department"],
+    "status": ["Durum", "durum", "Status", "status"],
+}
+
 DEPARTMENT_MAP = {
     "HAVACILIK YONETIMI": {
         "png_template": TEMPLATES_DIR / "havacilik_yonetimi.png",
@@ -44,6 +55,16 @@ DEPARTMENT_MAP = {
     },
 }
 
+DEFAULT_DEPARTMENT_CONFIG = {
+    "png_template": TEMPLATES_DIR / "genel_kariyer.png",
+    "mail_subject": "Kariyer Yol Haritan Hazır",
+    "mail_body": (
+        "Ilgi alanlarina gore genel kariyer yol haritan hazirlandi. "
+        "Ekteki raporla bir sonraki adimini guvenle planlayabilirsin."
+    ),
+    "text_coords": DEFAULT_TEXT_COORDS,
+}
+
 DEPARTMENT_ALIASES = {
     "HAVACILIK YONETIMI": "HAVACILIK YONETIMI",
     "HAVACILIK YÖNETIMI": "HAVACILIK YONETIMI",
@@ -62,6 +83,4 @@ def normalize_department(value: str) -> str:
 def get_department_config(department_name: str) -> dict:
     normalized = normalize_department(department_name)
     canonical = DEPARTMENT_ALIASES.get(normalized, normalized)
-    if canonical not in DEPARTMENT_MAP:
-        raise KeyError(f"Desteklenmeyen bolum: {department_name}")
-    return DEPARTMENT_MAP[canonical]
+    return DEPARTMENT_MAP.get(canonical, DEFAULT_DEPARTMENT_CONFIG)

@@ -8,13 +8,12 @@ from typing import Any
 import pandas as pd
 from dotenv import load_dotenv
 
-from config import DATA_DIR, FONT_PATH, LOGS_DIR, OUTPUT_DIR, get_department_config
+from config import DATA_DIR, FONT_PATH, FORM_FIELD_ALIASES, LOGS_DIR, OUTPUT_DIR, get_department_config
 from mailer import send_mail_batch_with_pdf
 from pdf_engine import generate_participant_pdf
 
 load_dotenv()
 
-STATUS_VALUES_SENT = {"gonderildi", "gönderildi", "sent"}
 SMTP_BATCH_SIZE = int(os.getenv("SMTP_BATCH_SIZE", "50"))
 SMTP_BATCH_SLEEP_SECONDS = int(os.getenv("SMTP_BATCH_SLEEP_SECONDS", "10"))
 
@@ -52,6 +51,24 @@ def get_first_existing_key(data: dict[str, Any], options: list[str], default: st
         if key in data and str(data.get(key, "")).strip():
             return str(data[key]).strip()
     return default
+
+
+def is_status_pending(status_value: Any) -> bool:
+    if status_value is None:
+        return True
+
+    status_text = str(status_value).strip()
+    return status_text == "" or status_text.lower() in {"nan", "none", "null"}
+
+
+def extract_participant_name(data: dict[str, Any]) -> str:
+    full_name = get_first_existing_key(data, FORM_FIELD_ALIASES["full_name"])
+    if full_name:
+        return full_name
+
+    first_name = get_first_existing_key(data, FORM_FIELD_ALIASES["first_name"])
+    last_name = get_first_existing_key(data, FORM_FIELD_ALIASES["last_name"])
+    return " ".join(part for part in [first_name, last_name] if part).strip()
 
 
 def build_html_mail_body(*, participant_name: str, department_name: str, career_message: str) -> str:
@@ -111,7 +128,7 @@ class CSVDataSource:
             self.df[self.status_column] = ""
 
     def _detect_status_column(self) -> str:
-        candidates = ["Durum", "durum", "Status", "status"]
+        candidates = FORM_FIELD_ALIASES["status"]
         for candidate in candidates:
             if candidate in self.df.columns:
                 return candidate
@@ -121,20 +138,20 @@ class CSVDataSource:
         output = []
         for idx, row in self.df.iterrows():
             row_dict = row.to_dict()
+            status_raw = row_dict.get(self.status_column, "")
+            status_value = str(status_raw).strip()
+            if not is_status_pending(status_value):
+                continue
+
             output.append(
                 {
                     "row_ref": int(idx),
-                    "name": get_first_existing_key(row_dict, ["Ad Soyad", "AdSoyad", "ad_soyad", "name"]),
-                    "school": get_first_existing_key(row_dict, ["Okul", "okul", "School", "school"]),
-                    "department": get_first_existing_key(
-                        row_dict,
-                        ["Bolum", "Bölüm", "bolum", "bölüm", "Department", "department"],
-                    ),
-                    "email": get_first_existing_key(
-                        row_dict,
-                        ["Eposta", "E-posta", "Email", "email", "Mail", "mail"],
-                    ),
-                    "status": str(row_dict.get(self.status_column, "")).strip(),
+                    "timestamp": get_first_existing_key(row_dict, FORM_FIELD_ALIASES["timestamp"]),
+                    "name": extract_participant_name(row_dict),
+                    "school": get_first_existing_key(row_dict, FORM_FIELD_ALIASES["school"]),
+                    "department": get_first_existing_key(row_dict, FORM_FIELD_ALIASES["department"]),
+                    "email": get_first_existing_key(row_dict, FORM_FIELD_ALIASES["email"]),
+                    "status": status_value,
                 }
             )
         return output
@@ -171,7 +188,7 @@ class GoogleSheetsDataSource:
         self.status_col_index = self.headers.index(self.status_column) + 1
 
     def _detect_status_column(self) -> str:
-        candidates = ["Durum", "durum", "Status", "status"]
+        candidates = FORM_FIELD_ALIASES["status"]
         for candidate in candidates:
             if candidate in self.headers:
                 return candidate
@@ -184,20 +201,19 @@ class GoogleSheetsDataSource:
         rows = self.worksheet.get_all_records()
         output = []
         for i, row in enumerate(rows, start=2):
+            status_value = get_first_existing_key(row, [self.status_column])
+            if not is_status_pending(status_value):
+                continue
+
             output.append(
                 {
                     "row_ref": i,
-                    "name": get_first_existing_key(row, ["Ad Soyad", "AdSoyad", "ad_soyad", "name"]),
-                    "school": get_first_existing_key(row, ["Okul", "okul", "School", "school"]),
-                    "department": get_first_existing_key(
-                        row,
-                        ["Bolum", "Bölüm", "bolum", "bölüm", "Department", "department"],
-                    ),
-                    "email": get_first_existing_key(
-                        row,
-                        ["Eposta", "E-posta", "Email", "email", "Mail", "mail"],
-                    ),
-                    "status": get_first_existing_key(row, [self.status_column]),
+                    "timestamp": get_first_existing_key(row, FORM_FIELD_ALIASES["timestamp"]),
+                    "name": extract_participant_name(row),
+                    "school": get_first_existing_key(row, FORM_FIELD_ALIASES["school"]),
+                    "department": get_first_existing_key(row, FORM_FIELD_ALIASES["department"]),
+                    "email": get_first_existing_key(row, FORM_FIELD_ALIASES["email"]),
+                    "status": status_value,
                 }
             )
         return output
@@ -255,7 +271,7 @@ def process_participants() -> None:
     data_source = build_data_source()
     participants = data_source.records()
 
-    logging.info("Toplam kayit: %s", len(participants))
+    logging.info("Toplam yeni kayit (Durum bos): %s", len(participants))
     if DRY_RUN:
         logging.warning("DRY_RUN etkin: SMTP gonderimi ve durum guncellemesi yapilmayacak.")
     if not ENABLE_SMTP_SEND:
@@ -266,11 +282,6 @@ def process_participants() -> None:
 
     for participant in participants:
         try:
-            status = participant["status"].strip().lower()
-            if status in STATUS_VALUES_SENT:
-                logging.info("Atlandi (zaten gonderildi): %s", participant["name"])
-                continue
-
             if not all(
                 [
                     participant["name"],
