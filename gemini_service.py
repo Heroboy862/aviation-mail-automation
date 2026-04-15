@@ -12,7 +12,7 @@ def _env_flag(name: str, default: str = "false") -> bool:
 
 
 def _rate_limit_wait_seconds() -> float:
-    return max(0.0, float(os.getenv("GEMINI_REQUEST_DELAY_SECONDS", "4")))
+    return max(0.0, float(os.getenv("GEMINI_REQUEST_DELAY_SECONDS", "3")))
 
 
 def _enforce_rate_limit_before_request() -> None:
@@ -34,9 +34,8 @@ def _mark_request_finished() -> None:
 
 def _build_prompt(participant_name: str, department_name: str) -> str:
     return (
-        f"Sen bir kıdemli havacılık danışmanısın. {participant_name} isimli "
-        f"{department_name} öğrencisine, kariyerinde fark yaratması için 3 cümlelik, "
-        "teknik derinliği olan ve motivasyonel bir tavsiye ver."
+        f"{participant_name} isimli {department_name} öğrencisi için 3 cümlelik, "
+        "somut adımlar içeren bir havacılık kariyer tavsiyesi oluştur."
     )
 
 

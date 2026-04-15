@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 
 from config import ARCHIVE_DIR, DATA_DIR, FONT_PATH, FORM_FIELD_ALIASES, LOGS_DIR, TEMP_PDF_DIR, get_department_config
 from gemini_service import generate_career_advice
-from mailer import send_mail_batch_with_pdf
+from mailer import send_mail_batch_with_pdf, send_mail_with_pdf
 from pdf_engine import generate_participant_pdf
 
 load_dotenv()
@@ -34,6 +34,11 @@ else:
     ENABLE_STATUS_UPDATE = _env_flag("ENABLE_STATUS_UPDATE", "true")
 MAX_SEND_COUNT = max(int(os.getenv("MAX_SEND_COUNT", "0")), 0)
 ARCHIVE_SENT_PDFS = _env_flag("ARCHIVE_SENT_PDFS", "true")
+LIVE_LOOP = _env_flag("LIVE_LOOP", "false")
+LIVE_POLL_SECONDS = max(int(os.getenv("LIVE_POLL_SECONDS", "20")), 1)
+
+STATUS_SENT = "Gönderildi"
+STATUS_ERROR = "Hata Alındı"
 
 
 def post_send_attachment_cleanup(sent_jobs: list[dict[str, Any]]) -> None:
@@ -88,11 +93,15 @@ def get_first_existing_key(data: dict[str, Any], options: list[str], default: st
 
 
 def is_status_pending(status_value: Any) -> bool:
+    """Durum bos: Form/Sheets'te '', CSV'de pandas NaN veya bos string."""
     if status_value is None:
         return True
-
-    status_text = str(status_value).strip()
-    return status_text == "" or status_text.lower() in {"nan", "none", "null"}
+    s = str(status_value).strip()
+    if s == "":
+        return True
+    if s.lower() in {"nan", "none", "null"}:
+        return True
+    return False
 
 
 def extract_participant_name(data: dict[str, Any]) -> str:
@@ -193,12 +202,18 @@ class CSVDataSource:
     def mark_sent(self, row_ref: int) -> None:
         self.mark_sent_batch([row_ref])
 
-    def mark_sent_batch(self, row_refs: list[int]) -> None:
+    def write_row_status_batch(self, row_refs: list[int], value: str) -> None:
         if not row_refs:
             return
-        unique_rows = sorted(set(row_refs))
-        self.df.loc[unique_rows, self.status_column] = "Gönderildi"
+        for r in sorted(set(row_refs)):
+            self.df.loc[r, self.status_column] = value
         self.df.to_csv(self.csv_path, index=False)
+
+    def write_row_status(self, row_ref: int, value: str) -> None:
+        self.write_row_status_batch([row_ref], value)
+
+    def mark_sent_batch(self, row_refs: list[int]) -> None:
+        self.write_row_status_batch(row_refs, STATUS_SENT)
 
 
 class GoogleSheetsDataSource:
@@ -255,7 +270,7 @@ class GoogleSheetsDataSource:
     def mark_sent(self, row_ref: int) -> None:
         self.mark_sent_batch([row_ref])
 
-    def mark_sent_batch(self, row_refs: list[int]) -> None:
+    def write_row_status_batch(self, row_refs: list[int], value: str) -> None:
         if not row_refs:
             return
 
@@ -263,10 +278,16 @@ class GoogleSheetsDataSource:
 
         unique_rows = sorted(set(row_refs))
         cells = [
-            gspread.Cell(row=row_ref, col=self.status_col_index, value="Gönderildi")
+            gspread.Cell(row=row_ref, col=self.status_col_index, value=value)
             for row_ref in unique_rows
         ]
         self.worksheet.update_cells(cells, value_input_option="USER_ENTERED")
+
+    def write_row_status(self, row_ref: int, value: str) -> None:
+        self.write_row_status_batch([row_ref], value)
+
+    def mark_sent_batch(self, row_refs: list[int]) -> None:
+        self.write_row_status_batch(row_refs, STATUS_SENT)
 
 
 def build_data_source() -> CSVDataSource | GoogleSheetsDataSource:
@@ -296,6 +317,142 @@ def build_data_source() -> CSVDataSource | GoogleSheetsDataSource:
             return CSVDataSource(csv_path=candidate)
 
     return CSVDataSource(csv_path=csv_path)
+
+
+def process_one_record(
+    data_source: CSVDataSource | GoogleSheetsDataSource,
+    participant: dict[str, Any],
+) -> None:
+    """Tek satir: Gemini -> PDF -> mail -> Arsiv; basarida Gönderildi, hatada Hata Alindi."""
+    row_ref = int(participant["row_ref"])
+    display_name = participant.get("name") or "Bilinmiyor"
+    logging.info(
+        "Veri okundu | satir=%s | ad=%s | bolum=%s | eposta=%s",
+        row_ref,
+        display_name,
+        participant.get("department", ""),
+        participant.get("email", ""),
+    )
+    try:
+        if not all(
+            [
+                participant["name"],
+                participant["school"],
+                participant["department"],
+                participant["email"],
+            ]
+        ):
+            raise ValueError(f"Eksik katilimci bilgisi: {participant}")
+
+        department_config = get_department_config(participant["department"])
+        career_advice = generate_career_advice(
+            participant_name=participant["name"],
+            department_name=participant["department"],
+        )
+        logging.info("Tavsiye uretildi | satir=%s | ad=%s", row_ref, display_name)
+
+        pdf_name = (
+            f"{sanitize_filename(participant['name'])}_"
+            f"{sanitize_filename(participant['department'])}.pdf"
+        )
+        pdf_output_path = TEMP_PDF_DIR / pdf_name
+
+        generate_participant_pdf(
+            template_path=Path(department_config["png_template"]),
+            output_path=pdf_output_path,
+            font_path=FONT_PATH,
+            participant_name=participant["name"],
+            school_name=participant["school"],
+            department_name=participant["department"],
+            career_advice=career_advice,
+            text_coords=department_config["text_coords"],
+        )
+        logging.info("PDF hazirlandi | satir=%s | dosya=%s", row_ref, pdf_output_path)
+
+        html_body = build_html_mail_body(
+            participant_name=participant["name"],
+            department_name=participant["department"],
+            career_message=career_advice,
+        )
+
+        if ENABLE_SMTP_SEND:
+            send_mail_with_pdf(
+                recipient_email=participant["email"],
+                subject=department_config["mail_subject"],
+                body=career_advice,
+                html_body=html_body,
+                attachment_path=pdf_output_path,
+            )
+            logging.info("Mail gitti | satir=%s | hedef=%s", row_ref, participant["email"])
+        else:
+            logging.info(
+                "Mail simule edildi (SMTP kapali) | satir=%s | hedef=%s",
+                row_ref,
+                participant["email"],
+            )
+
+        post_send_attachment_cleanup(
+            [
+                {
+                    "participant": participant,
+                    "attachment_path": pdf_output_path,
+                }
+            ]
+        )
+
+        if ENABLE_STATUS_UPDATE:
+            data_source.write_row_status(row_ref, STATUS_SENT)
+            logging.info("Durum guncellendi | satir=%s | %s", row_ref, STATUS_SENT)
+        else:
+            logging.info("Durum guncellemesi kapali | satir=%s", row_ref)
+
+    except Exception:
+        logging.exception("Kayit basarisiz | satir=%s | ad=%s", row_ref, display_name)
+        if ENABLE_STATUS_UPDATE:
+            try:
+                data_source.write_row_status(row_ref, STATUS_ERROR)
+                logging.info("Durum guncellendi | satir=%s | %s", row_ref, STATUS_ERROR)
+            except Exception:
+                logging.exception(
+                    "Durum yazilamadi | satir=%s | deger=%s",
+                    row_ref,
+                    STATUS_ERROR,
+                )
+
+
+def run_live_loop() -> None:
+    """Google Sheet'i periyodik tarar; bos Durum satirlarini isler (gspread)."""
+    setup_logging()
+    TEMP_PDF_DIR.mkdir(parents=True, exist_ok=True)
+
+    if os.getenv("DATA_SOURCE", "csv").strip().lower() != "google_sheets":
+        raise ValueError("LIVE_LOOP icin DATA_SOURCE=google_sheets olmalidir.")
+
+    data_source = build_data_source()
+    if not isinstance(data_source, GoogleSheetsDataSource):
+        raise TypeError("Canli dongu yalnizca Google Sheets ile calisir.")
+
+    logging.info(
+        "Canli dongu basladi | poll=%s sn | DRY_RUN=%s | SMTP=%s | durum_yazimi=%s",
+        LIVE_POLL_SECONDS,
+        DRY_RUN,
+        ENABLE_SMTP_SEND,
+        ENABLE_STATUS_UPDATE,
+    )
+    if DRY_RUN:
+        logging.warning("DRY_RUN etkin: SMTP ve durum guncellemesi kapali.")
+    while True:
+        try:
+            participants = data_source.records()
+            logging.info("Sayfa kontrol edildi | bos Durum satiri=%s", len(participants))
+            for participant in participants:
+                process_one_record(data_source, participant)
+        except KeyboardInterrupt:
+            logging.info("Canli dongu sonlandirildi (Ctrl+C).")
+            break
+        except Exception:
+            logging.exception("Canli dongu turunda hata; %s sn sonra tekrar denenecek.", LIVE_POLL_SECONDS)
+        time.sleep(LIVE_POLL_SECONDS)
 
 
 def process_participants() -> None:
@@ -370,6 +527,19 @@ def process_participants() -> None:
                 participant.get("name", "Bilinmiyor"),
                 exc,
             )
+            if ENABLE_STATUS_UPDATE:
+                try:
+                    data_source.write_row_status(int(participant["row_ref"]), STATUS_ERROR)
+                    logging.info(
+                        "Durum guncellendi | satir=%s | %s",
+                        participant["row_ref"],
+                        STATUS_ERROR,
+                    )
+                except Exception:
+                    logging.exception(
+                        "Durum yazilamadi | satir=%s",
+                        participant.get("row_ref"),
+                    )
             continue
 
     if not prepared_jobs:
@@ -422,6 +592,16 @@ def process_participants() -> None:
             failure.get("recipient_email", participant.get("email", "")),
             failure.get("error", "Bilinmeyen hata"),
         )
+        if ENABLE_STATUS_UPDATE:
+            try:
+                data_source.write_row_status(int(participant["row_ref"]), STATUS_ERROR)
+                logging.info(
+                    "Durum guncellendi | satir=%s | %s",
+                    participant["row_ref"],
+                    STATUS_ERROR,
+                )
+            except Exception:
+                logging.exception("Durum yazilamadi | satir=%s", participant.get("row_ref"))
 
     if sent_row_refs and ENABLE_STATUS_UPDATE:
         data_source.mark_sent_batch(sent_row_refs)
@@ -458,4 +638,7 @@ def process_participants() -> None:
 
 
 if __name__ == "__main__":
-    process_participants()
+    if LIVE_LOOP:
+        run_live_loop()
+    else:
+        process_participants()
