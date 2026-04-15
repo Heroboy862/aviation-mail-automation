@@ -24,6 +24,9 @@ def _env_flag(name: str, default: str = "false") -> bool:
 
 
 DRY_RUN = _env_flag("DRY_RUN", "false")
+ENABLE_SMTP_SEND = _env_flag("ENABLE_SMTP_SEND", "false" if DRY_RUN else "true")
+ENABLE_STATUS_UPDATE = _env_flag("ENABLE_STATUS_UPDATE", "false" if DRY_RUN else "true")
+MAX_SEND_COUNT = max(int(os.getenv("MAX_SEND_COUNT", "0")), 0)
 
 
 def setup_logging() -> None:
@@ -233,6 +236,15 @@ def build_data_source() -> CSVDataSource | GoogleSheetsDataSource:
         )
 
     csv_path = Path(os.getenv("CSV_PATH", str(DATA_DIR / "participants.csv")))
+    if csv_path.exists():
+        return CSVDataSource(csv_path=csv_path)
+
+    fallback_candidates = [Path("participants.csv"), DATA_DIR / "participants.csv"]
+    for candidate in fallback_candidates:
+        if candidate.exists():
+            logging.warning("CSV_PATH bulunamadi (%s). Otomatik fallback kullaniliyor: %s", csv_path, candidate)
+            return CSVDataSource(csv_path=candidate)
+
     return CSVDataSource(csv_path=csv_path)
 
 
@@ -246,6 +258,10 @@ def process_participants() -> None:
     logging.info("Toplam kayit: %s", len(participants))
     if DRY_RUN:
         logging.warning("DRY_RUN etkin: SMTP gonderimi ve durum guncellemesi yapilmayacak.")
+    if not ENABLE_SMTP_SEND:
+        logging.warning("SMTP gonderimi kapali: mailler simule edilecek.")
+    if not ENABLE_STATUS_UPDATE:
+        logging.warning("Durum guncellemesi kapali: veri kaynagi yazimi yapilmayacak.")
     prepared_jobs: list[dict[str, Any]] = []
 
     for participant in participants:
@@ -306,10 +322,18 @@ def process_participants() -> None:
         logging.info("Gonderilecek yeni kayit bulunamadi.")
         return
 
-    if DRY_RUN:
+    if MAX_SEND_COUNT and len(prepared_jobs) > MAX_SEND_COUNT:
+        logging.warning(
+            "Kademeli gecis limiti etkin: %s kayit icinden ilk %s kayit gonderilecek.",
+            len(prepared_jobs),
+            MAX_SEND_COUNT,
+        )
+        prepared_jobs = prepared_jobs[:MAX_SEND_COUNT]
+
+    if not ENABLE_SMTP_SEND:
         sent_indices = list(range(len(prepared_jobs)))
         failures: list[dict[str, Any]] = []
-        logging.info("DRY_RUN: %s e-posta gonderimi simule edildi.", len(prepared_jobs))
+        logging.info("SMTP simule edildi: %s e-posta gonderimi yapilmadi.", len(prepared_jobs))
     else:
         logging.info("Toplu SMTP gonderimi basliyor: %s kayit", len(prepared_jobs))
         sent_indices, failures = send_mail_batch_with_pdf(
@@ -343,11 +367,11 @@ def process_participants() -> None:
             failure.get("error", "Bilinmeyen hata"),
         )
 
-    if sent_row_refs and not DRY_RUN:
+    if sent_row_refs and ENABLE_STATUS_UPDATE:
         data_source.mark_sent_batch(sent_row_refs)
         logging.info("Durumlar toplu guncellendi: %s satir", len(set(sent_row_refs)))
-    elif sent_row_refs and DRY_RUN:
-        logging.info("DRY_RUN: %s satir icin durum guncellemesi simule edildi.", len(set(sent_row_refs)))
+    elif sent_row_refs and not ENABLE_STATUS_UPDATE:
+        logging.info("Durum guncellemesi simule edildi: %s satir yazilmadi.", len(set(sent_row_refs)))
 
     if failed_mail_report:
         report_path = LOGS_DIR / "failed_emails_report.txt"

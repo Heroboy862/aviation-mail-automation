@@ -93,6 +93,20 @@ DRY_RUN=true
 - CSV/Google Sheets durum guncellemesi yapilmaz,
 - surec loglari ve ozet raporlar uretilir.
 
+### Kademeli Canliya Gecis (Onerilen)
+
+Canliya asamali gecis icin su bayraklari kullanabilirsin:
+
+```env
+ENABLE_SMTP_SEND=true
+ENABLE_STATUS_UPDATE=false
+MAX_SEND_COUNT=25
+```
+
+- `ENABLE_SMTP_SEND=false`: Mail gonderimini simule eder.
+- `ENABLE_STATUS_UPDATE=false`: CSV/Google Sheets durum yazimini kapatir.
+- `MAX_SEND_COUNT=25`: Sadece ilk 25 kayitla test gonderimi yapar (`0` = sinirsiz).
+
 ### Google Sheets Ayarlari (Opsiyonel)
 
 Google Sheets kullanmak icin:
@@ -157,3 +171,8 @@ Bu yapi orta-yuksek hacim icin optimize edilmistir:
 - SMTP baglantisi her batch icin yeniden acilir (timeout riski azalir),
 - Google Sheets tek tek degil toplu guncellenir,
 - hata toleransli akis sayesinde kampanya sureci yarida kesilmez.
+
+## Gecis Kolaylastirici Fallbackler
+
+- `CSV_PATH` bulunamazsa proje kokundeki `participants.csv` otomatik denenir.
+- Template dosyalari henuz hazir degilse `ALLOW_MISSING_TEMPLATE_FALLBACK=true` ile gecici beyaz PDF uretilir.

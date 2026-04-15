@@ -1,6 +1,14 @@
+import os
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
+
+
+def _env_flag(name: str, default: str = "false") -> bool:
+    return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "on"}
+
+
+ALLOW_MISSING_TEMPLATE_FALLBACK = _env_flag("ALLOW_MISSING_TEMPLATE_FALLBACK", "true")
 
 
 def _load_font(font_path: Path, size: int = 44) -> ImageFont.ImageFont:
@@ -26,13 +34,31 @@ def generate_participant_pdf(
     department_name: str,
     text_coords: dict,
 ) -> Path:
-    if not template_path.exists():
-        raise FileNotFoundError(f"Template dosyasi bulunamadi: {template_path}")
-
     output_path.parent.mkdir(parents=True, exist_ok=True)
     font = _load_font(font_path=font_path, size=44)
 
-    with Image.open(template_path).convert("RGB") as image:
+    if template_path.exists():
+        image = Image.open(template_path).convert("RGB")
+    elif ALLOW_MISSING_TEMPLATE_FALLBACK:
+        image = Image.new("RGB", (2480, 3508), color=(255, 255, 255))
+        draw = ImageDraw.Draw(image)
+        warn_font = _load_font(font_path=font_path, size=36)
+        draw.text(
+            xy=(150, 150),
+            text=f"Template bulunamadi: {template_path.name}",
+            font=warn_font,
+            fill=(160, 20, 20),
+        )
+        draw.text(
+            xy=(150, 220),
+            text="Gecici fallback cikti olusturuldu.",
+            font=warn_font,
+            fill=(90, 90, 90),
+        )
+    else:
+        raise FileNotFoundError(f"Template dosyasi bulunamadi: {template_path}")
+
+    with image:
         draw = ImageDraw.Draw(image)
 
         draw.text(
