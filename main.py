@@ -1,6 +1,8 @@
 import logging
 import os
 import re
+import shutil
+import time
 from html import escape
 from pathlib import Path
 from typing import Any
@@ -8,7 +10,8 @@ from typing import Any
 import pandas as pd
 from dotenv import load_dotenv
 
-from config import DATA_DIR, FONT_PATH, FORM_FIELD_ALIASES, LOGS_DIR, OUTPUT_DIR, get_department_config
+from config import ARCHIVE_DIR, DATA_DIR, FONT_PATH, FORM_FIELD_ALIASES, LOGS_DIR, TEMP_PDF_DIR, get_department_config
+from gemini_service import generate_career_advice
 from mailer import send_mail_batch_with_pdf
 from pdf_engine import generate_participant_pdf
 
@@ -16,6 +19,7 @@ load_dotenv()
 
 SMTP_BATCH_SIZE = int(os.getenv("SMTP_BATCH_SIZE", "50"))
 SMTP_BATCH_SLEEP_SECONDS = int(os.getenv("SMTP_BATCH_SLEEP_SECONDS", "10"))
+GEMINI_REQUEST_DELAY_SECONDS = max(float(os.getenv("GEMINI_REQUEST_DELAY_SECONDS", "2")), 0.0)
 
 
 def _env_flag(name: str, default: str = "false") -> bool:
@@ -23,9 +27,41 @@ def _env_flag(name: str, default: str = "false") -> bool:
 
 
 DRY_RUN = _env_flag("DRY_RUN", "false")
-ENABLE_SMTP_SEND = _env_flag("ENABLE_SMTP_SEND", "false" if DRY_RUN else "true")
-ENABLE_STATUS_UPDATE = _env_flag("ENABLE_STATUS_UPDATE", "false" if DRY_RUN else "true")
+if DRY_RUN:
+    ENABLE_SMTP_SEND = False
+    ENABLE_STATUS_UPDATE = False
+else:
+    ENABLE_SMTP_SEND = _env_flag("ENABLE_SMTP_SEND", "true")
+    ENABLE_STATUS_UPDATE = _env_flag("ENABLE_STATUS_UPDATE", "true")
 MAX_SEND_COUNT = max(int(os.getenv("MAX_SEND_COUNT", "0")), 0)
+ARCHIVE_SENT_PDFS = _env_flag("ARCHIVE_SENT_PDFS", "true")
+GEMINI_USE_MOCK = _env_flag("GEMINI_USE_MOCK", "false")
+
+
+def post_send_attachment_cleanup(sent_jobs: list[dict[str, Any]]) -> None:
+    if not sent_jobs:
+        return
+
+    if ARCHIVE_SENT_PDFS:
+        ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+
+    for job in sent_jobs:
+        attachment_path = Path(job["attachment_path"])
+        if not attachment_path.exists():
+            continue
+
+        try:
+            if ARCHIVE_SENT_PDFS:
+                target_path = ARCHIVE_DIR / attachment_path.name
+                if target_path.exists():
+                    target_path = ARCHIVE_DIR / f"{attachment_path.stem}_{int(time.time())}{attachment_path.suffix}"
+                shutil.move(str(attachment_path), str(target_path))
+                logging.info("PDF arsive tasindi: %s", target_path)
+            else:
+                attachment_path.unlink()
+                logging.info("PDF silindi: %s", attachment_path)
+        except Exception as exc:
+            logging.warning("PDF temizleme basarisiz (%s): %s", attachment_path, exc)
 
 
 def setup_logging() -> None:
@@ -266,7 +302,7 @@ def build_data_source() -> CSVDataSource | GoogleSheetsDataSource:
 
 def process_participants() -> None:
     setup_logging()
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    TEMP_PDF_DIR.mkdir(parents=True, exist_ok=True)
 
     data_source = build_data_source()
     participants = data_source.records()
@@ -280,7 +316,8 @@ def process_participants() -> None:
         logging.warning("Durum guncellemesi kapali: veri kaynagi yazimi yapilmayacak.")
     prepared_jobs: list[dict[str, Any]] = []
 
-    for participant in participants:
+    for index, participant in enumerate(participants):
+        gemini_called = False
         try:
             if not all(
                 [
@@ -293,12 +330,17 @@ def process_participants() -> None:
                 raise ValueError(f"Eksik katilimci bilgisi: {participant}")
 
             department_config = get_department_config(participant["department"])
+            career_advice = generate_career_advice(
+                participant_name=participant["name"],
+                department_name=participant["department"],
+            )
+            gemini_called = True
 
             pdf_name = (
                 f"{sanitize_filename(participant['name'])}_"
                 f"{sanitize_filename(participant['department'])}.pdf"
             )
-            pdf_output_path = OUTPUT_DIR / pdf_name
+            pdf_output_path = TEMP_PDF_DIR / pdf_name
 
             generate_participant_pdf(
                 template_path=Path(department_config["png_template"]),
@@ -307,6 +349,7 @@ def process_participants() -> None:
                 participant_name=participant["name"],
                 school_name=participant["school"],
                 department_name=participant["department"],
+                career_advice=career_advice,
                 text_coords=department_config["text_coords"],
             )
 
@@ -315,11 +358,11 @@ def process_participants() -> None:
                     "participant": participant,
                     "recipient_email": participant["email"],
                     "subject": department_config["mail_subject"],
-                    "body": department_config["mail_body"],
+                    "body": career_advice,
                     "html_body": build_html_mail_body(
                         participant_name=participant["name"],
                         department_name=participant["department"],
-                        career_message=department_config["mail_body"],
+                        career_message=career_advice,
                     ),
                     "attachment_path": pdf_output_path,
                 }
@@ -328,6 +371,14 @@ def process_participants() -> None:
         except Exception as exc:
             logging.error("Kayit islenemedi (%s): %s", participant.get("name", "Bilinmiyor"), exc)
             continue
+        finally:
+            if (
+                gemini_called
+                and not GEMINI_USE_MOCK
+                and GEMINI_REQUEST_DELAY_SECONDS > 0
+                and index < len(participants) - 1
+            ):
+                time.sleep(GEMINI_REQUEST_DELAY_SECONDS)
 
     if not prepared_jobs:
         logging.info("Gonderilecek yeni kayit bulunamadi.")
@@ -354,10 +405,12 @@ def process_participants() -> None:
         )
 
     sent_row_refs: list[int] = []
+    sent_jobs: list[dict[str, Any]] = []
     for sent_index in sent_indices:
         job = prepared_jobs[sent_index]
         participant = job["participant"]
         sent_row_refs.append(participant["row_ref"])
+        sent_jobs.append(job)
         logging.info("Gonderildi: %s -> %s", participant["name"], participant["email"])
 
     failed_mail_report: list[dict[str, str]] = []
@@ -383,6 +436,8 @@ def process_participants() -> None:
         logging.info("Durumlar toplu guncellendi: %s satir", len(set(sent_row_refs)))
     elif sent_row_refs and not ENABLE_STATUS_UPDATE:
         logging.info("Durum guncellemesi simule edildi: %s satir yazilmadi.", len(set(sent_row_refs)))
+
+    post_send_attachment_cleanup(sent_jobs)
 
     if failed_mail_report:
         report_path = LOGS_DIR / "failed_emails_report.txt"

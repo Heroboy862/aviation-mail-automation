@@ -2,4 +2,6 @@
 __pycache__/
 *.pyc
 generated_pdfs/
+temp_pdf/
+Arsiv/
 logs/

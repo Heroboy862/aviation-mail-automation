@@ -5,6 +5,8 @@ ASSETS_DIR = BASE_DIR / "assets"
 TEMPLATES_DIR = ASSETS_DIR / "templates"
 FONT_PATH = ASSETS_DIR / "font.ttf"
 OUTPUT_DIR = BASE_DIR / "generated_pdfs"
+TEMP_PDF_DIR = BASE_DIR / "temp_pdf"
+ARCHIVE_DIR = BASE_DIR / "Arsiv"
 LOGS_DIR = BASE_DIR / "logs"
 DATA_DIR = BASE_DIR / "data"
 
@@ -12,6 +14,7 @@ DEFAULT_TEXT_COORDS = {
     "name": (300, 520),
     "school": (300, 580),
     "department": (300, 640),
+    "career_advice": (300, 780),
 }
 
 FORM_FIELD_ALIASES = {

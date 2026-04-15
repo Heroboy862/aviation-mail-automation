@@ -3,3 +3,4 @@ Pillow
 python-dotenv
 gspread
 google-auth
+google-generativeai
