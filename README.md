@@ -1,15 +1,24 @@
-# Havacılık Kariyer Yolu Otomasyon Sistemi
+# Havacilik Kariyer Yolu Otomasyon Sistemi
 
-Google Sheets veya CSV'den gelen katilimci verilerine gore:
-- bolume ozel PNG template secer,
-- katilimciya ozel PDF uretir,
-- PDF'i e-posta eki olarak gonderir,
-- kaydin durumunu `Gonderildi` olarak isaretler.
+Bu proje CSV veya Google Sheets kaynagindan katilimci bilgilerini okuyup:
+- bolume ozel PDF rapor olusturur,
+- ekiyle birlikte e-posta gonderir (batch SMTP),
+- gonderilen kayitlarin durumunu toplu gunceller (`update_cells`),
+- hatali gonderimleri raporlar.
+
+## Neler Degisti (Modern Yapi)
+
+- **Batch mailing:** Mailler varsayilan olarak 50'lik paketlerle gonderilir.
+- **Rate limit korumasi:** Her paket arasinda varsayilan 10 saniye beklenir.
+- **SMTP timeout korumasi:** Her paket icin SMTP baglantisi yeniden acilir/kapanir.
+- **HTML email:** Duz metin + f-string ile uretilen HTML icerik birlikte gonderilir.
+- **Batch status update:** Google Sheets durum kolonunda `update_cells` ile toplu guncelleme yapilir.
+- **Error resilience:** Basarisiz mailler toplanir, sistem durmaz, surec sonunda rapor uretilir.
 
 ## Proje Yapisi
 
 ```text
-mailgönderme/
+mailgonderme/
 ├─ config.py
 ├─ pdf_engine.py
 ├─ mailer.py
@@ -26,13 +35,15 @@ mailgönderme/
 │     └─ ucak_teknolojisi.png
 ├─ generated_pdfs/
 └─ logs/
+   ├─ process.log
+   └─ failed_emails_report.txt   # sadece hata varsa olusur
 ```
 
 ## Gereksinimler
 
 - Python 3.10+
-- SMTP erisimi olan bir e-posta hesabi
-- (Opsiyonel) Google Service Account JSON dosyasi
+- SMTP erisimi olan e-posta hesabi (uygulama sifresi onerilir)
+- (Opsiyonel) Google Service Account JSON
 
 Kurulum:
 
@@ -44,17 +55,11 @@ pip install -r requirements.txt
 
 `.env.example` dosyasini kopyalayip `.env` olusturun:
 
-```bash
-cp .env.example .env
-```
-
-Windows PowerShell icin:
-
 ```powershell
 Copy-Item .env.example .env
 ```
 
-`.env` icine SMTP bilgilerini girin:
+### Temel Ayarlar
 
 ```env
 DATA_SOURCE=csv
@@ -67,11 +72,33 @@ SMTP_PASSWORD=uygulama_sifresi
 FROM_EMAIL=ornek@domain.com
 ```
 
-### Google Sheets Kullanimi (Opsiyonel)
-
-`DATA_SOURCE=google_sheets` yapin ve su alanlari doldurun:
+### Batch Ayarlari
 
 ```env
+SMTP_BATCH_SIZE=50
+SMTP_BATCH_SLEEP_SECONDS=10
+```
+
+### Guvenli Test Modu (Dry Run)
+
+Gercek SMTP gonderimi ve veri kaynagi yazimini kapatip uctan uca akis testi yapmak icin:
+
+```env
+DRY_RUN=true
+```
+
+`DRY_RUN=true` iken:
+- PDF uretimi ve kayit hazirlama adimlari calisir,
+- SMTP gonderimi sadece simule edilir,
+- CSV/Google Sheets durum guncellemesi yapilmaz,
+- surec loglari ve ozet raporlar uretilir.
+
+### Google Sheets Ayarlari (Opsiyonel)
+
+Google Sheets kullanmak icin:
+
+```env
+DATA_SOURCE=google_sheets
 GOOGLE_SERVICE_ACCOUNT_JSON=C:/path/to/service-account.json
 GOOGLE_SHEET_NAME=SheetAdi
 GOOGLE_WORKSHEET_NAME=Sayfa1
@@ -79,7 +106,7 @@ GOOGLE_WORKSHEET_NAME=Sayfa1
 
 ## Veri Formati
 
-CSV icin `data/participants.csv` basliklari asagidaki varyantlardan biri olabilir:
+CSV veya Sheets kolon adlari su varyantlardan biri olabilir:
 - Ad: `Ad Soyad`, `AdSoyad`, `name`
 - Okul: `Okul`, `school`
 - Bolum: `Bolum`, `Bölüm`, `department`
@@ -101,22 +128,32 @@ python main.py
 
 ## Is Akisi
 
-Her kayit icin:
-1. Bolum bilgisi normalize edilir ve `config.py` mapping'inden bulunur.
-2. Ilgili PNG template acilir.
-3. `assets/font.ttf` ile ad/okul/bolum bilgileri koordinatlara yazilir.
-4. PDF `generated_pdfs/` klasorune kaydedilir.
-5. PDF e-posta eki olarak gonderilir.
-6. Durum `Gonderildi` olarak isaretlenir.
+1. Kayitlar okunur ve `Gonderildi` durumundakiler atlanir.
+2. Her uygun kayit icin bolume ozel PDF uretilir.
+3. Her kayit icin plain text + HTML e-posta govdesi hazirlanir.
+4. SMTP batch gonderim yapilir (50'lik paketler, aralarda bekleme).
+5. Basarili gonderimlerin satirlari toplu olarak `Gonderildi` isaretlenir.
+6. Basarisiz e-postalar raporlanir ve surec ozeti loglanir.
 
-## Hata Yonetimi ve Loglama
+## Loglama ve Hata Yonetimi
 
-- Bir kayit hata verirse sistem durmaz, sonraki kayda gecer.
-- Tum hatalar ve islem bilgileri `logs/process.log` dosyasina yazilir.
+- Surec loglari: `logs/process.log`
+- Basarisiz gonderim raporu: `logs/failed_emails_report.txt`
+- Bir e-posta hata verirse sistem tum sureci durdurmaz; diger kayitlara devam eder.
 
 ## Ozellestirme
 
 `config.py` dosyasinda:
-- `DEPARTMENT_MAP` ile bolum-template-mail eslesmelerini,
-- `text_coords` ile yazi konumlarini,
-- `mail_subject` ve `mail_body` ile bolume ozel e-posta metinlerini degistirebilirsiniz.
+- `DEPARTMENT_MAP`: bolum-template-mail eslesmesi
+- `text_coords`: PDF yazi koordinatlari
+- `mail_subject` / `mail_body`: bolume ozel mesajlar
+
+`main.py` dosyasinda:
+- `build_html_mail_body(...)`: HTML e-posta tasarimi
+
+## Performans Notu (500-1000 Kullanici)
+
+Bu yapi orta-yuksek hacim icin optimize edilmistir:
+- SMTP baglantisi her batch icin yeniden acilir (timeout riski azalir),
+- Google Sheets tek tek degil toplu guncellenir,
+- hata toleransli akis sayesinde kampanya sureci yarida kesilmez.

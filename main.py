@@ -1,6 +1,7 @@
 import logging
 import os
 import re
+from html import escape
 from pathlib import Path
 from typing import Any
 
@@ -8,12 +9,21 @@ import pandas as pd
 from dotenv import load_dotenv
 
 from config import DATA_DIR, FONT_PATH, LOGS_DIR, OUTPUT_DIR, get_department_config
-from mailer import send_mail_with_pdf
+from mailer import send_mail_batch_with_pdf
 from pdf_engine import generate_participant_pdf
 
 load_dotenv()
 
 STATUS_VALUES_SENT = {"gonderildi", "gönderildi", "sent"}
+SMTP_BATCH_SIZE = int(os.getenv("SMTP_BATCH_SIZE", "50"))
+SMTP_BATCH_SLEEP_SECONDS = int(os.getenv("SMTP_BATCH_SLEEP_SECONDS", "10"))
+
+
+def _env_flag(name: str, default: str = "false") -> bool:
+    return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "on"}
+
+
+DRY_RUN = _env_flag("DRY_RUN", "false")
 
 
 def setup_logging() -> None:
@@ -39,6 +49,51 @@ def get_first_existing_key(data: dict[str, Any], options: list[str], default: st
         if key in data and str(data.get(key, "")).strip():
             return str(data[key]).strip()
     return default
+
+
+def build_html_mail_body(*, participant_name: str, department_name: str, career_message: str) -> str:
+    safe_name = escape(participant_name)
+    safe_department = escape(department_name)
+    safe_message = escape(career_message)
+    return f"""\
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Kariyer Yol Haritasi</title>
+</head>
+<body style="margin:0;padding:0;background:#f4f6fb;font-family:Arial,sans-serif;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f4f6fb;padding:24px 12px;">
+    <tr>
+      <td align="center">
+        <table role="presentation" width="640" cellspacing="0" cellpadding="0" style="max-width:640px;width:100%;background:#ffffff;border-radius:12px;overflow:hidden;">
+          <tr>
+            <td style="background:#0b3d91;color:#ffffff;padding:20px 24px;">
+              <h1 style="margin:0;font-size:22px;line-height:1.3;">Kariyer Yol Haritan Hazir</h1>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:24px;color:#1f2a44;">
+              <p style="margin:0 0 14px 0;font-size:16px;">Merhaba <strong>{safe_name}</strong>,</p>
+              <p style="margin:0 0 14px 0;font-size:15px;line-height:1.7;">
+                <strong>{safe_department}</strong> bolumu icin hazirlanan kisisel kariyer raporun ektedir.
+              </p>
+              <div style="background:#f7f9ff;border:1px solid #e3e9ff;border-radius:10px;padding:16px;font-size:15px;line-height:1.7;">
+                {safe_message}
+              </div>
+              <p style="margin:16px 0 0 0;font-size:14px;color:#4b5c83;">
+                Basarilar dileriz.
+              </p>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>
+"""
 
 
 class CSVDataSource:
@@ -82,7 +137,13 @@ class CSVDataSource:
         return output
 
     def mark_sent(self, row_ref: int) -> None:
-        self.df.at[row_ref, self.status_column] = "Gönderildi"
+        self.mark_sent_batch([row_ref])
+
+    def mark_sent_batch(self, row_refs: list[int]) -> None:
+        if not row_refs:
+            return
+        unique_rows = sorted(set(row_refs))
+        self.df.loc[unique_rows, self.status_column] = "Gönderildi"
         self.df.to_csv(self.csv_path, index=False)
 
 
@@ -139,7 +200,20 @@ class GoogleSheetsDataSource:
         return output
 
     def mark_sent(self, row_ref: int) -> None:
-        self.worksheet.update_cell(row_ref, self.status_col_index, "Gönderildi")
+        self.mark_sent_batch([row_ref])
+
+    def mark_sent_batch(self, row_refs: list[int]) -> None:
+        if not row_refs:
+            return
+
+        import gspread
+
+        unique_rows = sorted(set(row_refs))
+        cells = [
+            gspread.Cell(row=row_ref, col=self.status_col_index, value="Gönderildi")
+            for row_ref in unique_rows
+        ]
+        self.worksheet.update_cells(cells, value_input_option="USER_ENTERED")
 
 
 def build_data_source() -> CSVDataSource | GoogleSheetsDataSource:
@@ -170,6 +244,10 @@ def process_participants() -> None:
     participants = data_source.records()
 
     logging.info("Toplam kayit: %s", len(participants))
+    if DRY_RUN:
+        logging.warning("DRY_RUN etkin: SMTP gonderimi ve durum guncellemesi yapilmayacak.")
+    prepared_jobs: list[dict[str, Any]] = []
+
     for participant in participants:
         try:
             status = participant["status"].strip().lower()
@@ -205,19 +283,96 @@ def process_participants() -> None:
                 text_coords=department_config["text_coords"],
             )
 
-            send_mail_with_pdf(
-                recipient_email=participant["email"],
-                subject=department_config["mail_subject"],
-                body=department_config["mail_body"],
-                attachment_path=pdf_output_path,
+            prepared_jobs.append(
+                {
+                    "participant": participant,
+                    "recipient_email": participant["email"],
+                    "subject": department_config["mail_subject"],
+                    "body": department_config["mail_body"],
+                    "html_body": build_html_mail_body(
+                        participant_name=participant["name"],
+                        department_name=participant["department"],
+                        career_message=department_config["mail_body"],
+                    ),
+                    "attachment_path": pdf_output_path,
+                }
             )
-
-            data_source.mark_sent(participant["row_ref"])
-            logging.info("Gonderildi: %s -> %s", participant["name"], participant["email"])
 
         except Exception as exc:
             logging.error("Kayit islenemedi (%s): %s", participant.get("name", "Bilinmiyor"), exc)
             continue
+
+    if not prepared_jobs:
+        logging.info("Gonderilecek yeni kayit bulunamadi.")
+        return
+
+    if DRY_RUN:
+        sent_indices = list(range(len(prepared_jobs)))
+        failures: list[dict[str, Any]] = []
+        logging.info("DRY_RUN: %s e-posta gonderimi simule edildi.", len(prepared_jobs))
+    else:
+        logging.info("Toplu SMTP gonderimi basliyor: %s kayit", len(prepared_jobs))
+        sent_indices, failures = send_mail_batch_with_pdf(
+            prepared_jobs,
+            batch_size=SMTP_BATCH_SIZE,
+            sleep_seconds=SMTP_BATCH_SLEEP_SECONDS,
+        )
+
+    sent_row_refs: list[int] = []
+    for sent_index in sent_indices:
+        job = prepared_jobs[sent_index]
+        participant = job["participant"]
+        sent_row_refs.append(participant["row_ref"])
+        logging.info("Gonderildi: %s -> %s", participant["name"], participant["email"])
+
+    failed_mail_report: list[dict[str, str]] = []
+    for failure in failures:
+        failed_index = int(failure["index"])
+        participant = prepared_jobs[failed_index]["participant"]
+        failed_mail_report.append(
+            {
+                "name": participant.get("name", "Bilinmiyor"),
+                "email": failure.get("recipient_email", participant.get("email", "")),
+                "error": failure.get("error", "Bilinmeyen hata"),
+            }
+        )
+        logging.error(
+            "Mail gonderilemedi (%s - %s): %s",
+            participant.get("name", "Bilinmiyor"),
+            failure.get("recipient_email", participant.get("email", "")),
+            failure.get("error", "Bilinmeyen hata"),
+        )
+
+    if sent_row_refs and not DRY_RUN:
+        data_source.mark_sent_batch(sent_row_refs)
+        logging.info("Durumlar toplu guncellendi: %s satir", len(set(sent_row_refs)))
+    elif sent_row_refs and DRY_RUN:
+        logging.info("DRY_RUN: %s satir icin durum guncellemesi simule edildi.", len(set(sent_row_refs)))
+
+    if failed_mail_report:
+        report_path = LOGS_DIR / "failed_emails_report.txt"
+        lines = [
+            f"Toplam denenen: {len(prepared_jobs)}",
+            f"Basarili: {len(sent_indices)}",
+            f"Basarisiz: {len(failed_mail_report)}",
+            "",
+            "Basarisiz e-posta listesi:",
+        ]
+        lines.extend(
+            [
+                f"- {item['name']} | {item['email']} | {item['error']}"
+                for item in failed_mail_report
+            ]
+        )
+        report_path.write_text("\n".join(lines), encoding="utf-8")
+        logging.warning("Basarisiz gonderimler raporlandi: %s", report_path)
+
+    logging.info(
+        "Gonderim ozeti -> Hazirlanan: %s | Basarili: %s | Basarisiz: %s",
+        len(prepared_jobs),
+        len(sent_indices),
+        len(failed_mail_report),
+    )
 
 
 if __name__ == "__main__":
