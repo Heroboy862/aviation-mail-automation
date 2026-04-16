@@ -51,6 +51,36 @@ def _wrap_text(
     return "\n".join(lines)
 
 
+def _get_qr_overlay() -> tuple[Image.Image, tuple[int, int]] | None:
+    """Load optional QR image and target position from env."""
+    qr_path_raw = os.getenv("QR_CODE_IMAGE_PATH", "").strip()
+    if not qr_path_raw:
+        return None
+
+    qr_path = Path(qr_path_raw)
+    if not qr_path.exists():
+        return None
+
+    try:
+        size = max(80, int(os.getenv("QR_CODE_SIZE", "320")))
+    except ValueError:
+        size = 320
+
+    try:
+        qr_image = Image.open(qr_path).convert("RGBA")
+    except Exception:
+        return None
+
+    qr_image = qr_image.resize((size, size))
+
+    try:
+        x = int(os.getenv("QR_CODE_X", "0"))
+        y = int(os.getenv("QR_CODE_Y", "0"))
+    except ValueError:
+        x, y = 0, 0
+    return qr_image, (x, y)
+
+
 def generate_participant_pdf(
     *,
     template_path: Path,
@@ -137,6 +167,15 @@ def generate_participant_pdf(
                 fill=(35, 35, 35),
                 spacing=12,
             )
+
+        qr_overlay = _get_qr_overlay()
+        if qr_overlay is not None:
+            qr_image, (qr_x, qr_y) = qr_overlay
+            if qr_x <= 0:
+                qr_x = image.width - qr_image.width - 120
+            if qr_y <= 0:
+                qr_y = image.height - qr_image.height - 120
+            image.paste(qr_image, (qr_x, qr_y), qr_image)
 
         image.save(str(output_path), "PDF", resolution=300.0)
 

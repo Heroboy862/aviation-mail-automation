@@ -300,8 +300,11 @@ def build_data_source() -> CSVDataSource | GoogleSheetsDataSource:
             raise ValueError(
                 "Google Sheets icin GOOGLE_SERVICE_ACCOUNT_JSON ve GOOGLE_SHEET_NAME gerekli."
             )
+        path_obj = Path(credentials_path)
+        if not path_obj.exists():
+            raise FileNotFoundError(f"GOOGLE_SERVICE_ACCOUNT_JSON bulunamadi: {path_obj}")
         return GoogleSheetsDataSource(
-            credentials_path=Path(credentials_path),
+            credentials_path=path_obj,
             sheet_name=sheet_name,
             worksheet_name=worksheet_name,
         )
@@ -327,7 +330,7 @@ def process_one_record(
     row_ref = int(participant["row_ref"])
     display_name = participant.get("name") or "Bilinmiyor"
     logging.info(
-        "Veri okundu | satir=%s | ad=%s | bolum=%s | eposta=%s",
+        "Yeni kayıt yakalandı | satir=%s | ad=%s | bolum=%s | eposta=%s",
         row_ref,
         display_name,
         participant.get("department", ""),
@@ -349,7 +352,7 @@ def process_one_record(
             participant_name=participant["name"],
             department_name=participant["department"],
         )
-        logging.info("Tavsiye uretildi | satir=%s | ad=%s", row_ref, display_name)
+        logging.info("Gemini tavsiyesi hazır | satir=%s | ad=%s", row_ref, display_name)
 
         pdf_name = (
             f"{sanitize_filename(participant['name'])}_"
@@ -383,7 +386,7 @@ def process_one_record(
                 html_body=html_body,
                 attachment_path=pdf_output_path,
             )
-            logging.info("Mail gitti | satir=%s | hedef=%s", row_ref, participant["email"])
+            logging.info("Mail uçuşa geçti | satir=%s | hedef=%s", row_ref, participant["email"])
         else:
             logging.info(
                 "Mail simule edildi (SMTP kapali) | satir=%s | hedef=%s",
@@ -443,6 +446,7 @@ def run_live_loop() -> None:
         logging.warning("DRY_RUN etkin: SMTP ve durum guncellemesi kapali.")
     while True:
         try:
+            logging.info("Radar tarıyor...")
             participants = data_source.records()
             logging.info("Sayfa kontrol edildi | bos Durum satiri=%s", len(participants))
             for participant in participants:
